@@ -1,0 +1,16 @@
+from fastapi import FastAPI
+from alerts import AlertSystem
+import os
+
+app = FastAPI()
+alert_system = AlertSystem()
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+# Add other endpoints as needed
+
+# Vercel serverless handler
+from mangum import Mangum
+handler = Mangum(app)
