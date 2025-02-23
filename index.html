@@ -130,13 +130,9 @@
             formData.append('file', file);
 
             try {
-                const response = await axios.post('http://localhost:8000/process-document', formData);
-                
-                // Display results
+                const response = await axios.post('/api/process-document', formData);
                 document.getElementById('processing-results').classList.remove('hidden');
                 document.getElementById('results-content').textContent = JSON.stringify(response.data, null, 2);
-                
-                // Update stats
                 const docsProcessed = parseInt(document.getElementById('docs-processed').textContent);
                 document.getElementById('docs-processed').textContent = docsProcessed + 1;
             } catch (error) {
@@ -148,12 +144,10 @@
         // Generate forecast
         document.getElementById('generate-forecast').addEventListener('click', async () => {
             try {
-                const response = await axios.post('http://localhost:8000/predict-demand', {
+                const response = await axios.post('/api/predict-demand', {
                     historical_data: [100, 120, 115, 130, 125, 135],
                     forecast_period: 3
                 });
-
-                // Update forecast chart
                 Plotly.update('forecast-chart', {
                     y: [response.data.forecast]
                 });
@@ -166,20 +160,19 @@
         // Optimize inventory
         document.getElementById('optimize-inventory').addEventListener('click', async () => {
             try {
-                const response = await axios.post('http://localhost:8000/optimize-inventory', {
-                    current_stock: [100, 150, 80],
-                    lead_times: [2, 3, 1]
+                const response = await axios.post('/api/optimize-inventory', {
+                    current_stock: { "item1": 100, "item2": 150, "item3": 80 },
+                    historical_demand: [{ "item1": 90, "item2": 140, "item3": 70 }],
+                    lead_times: { "item1": 2, "item2": 3, "item3": 1 },
+                    holding_cost: 0.5,
+                    stockout_cost: 2.0
                 });
-
-                // Update inventory chart
                 Plotly.update('inventory-chart', {
-                    y: [response.data.optimal_levels]
+                    y: [Object.values(response.data.optimal_order_quantities || {})]
                 });
-
-                // Add recommendations
                 const recommendationsDiv = document.getElementById('recommendations');
                 recommendationsDiv.innerHTML = '';
-                response.data.recommendations.forEach(rec => {
+                (response.data.recommendations || []).forEach(rec => {
                     const div = document.createElement('div');
                     div.className = 'p-4 bg-blue-50 rounded-lg';
                     div.textContent = rec;
