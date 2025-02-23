@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from ibm_watsonx_ai.foundation_models import Model
@@ -6,91 +6,22 @@ from ibm_watsonx_ai.metanames import GenTextParamsMetaNames
 from ibm_watsonx_ai.rag import RetrievalAugmentedGenerator
 from ibm_watsonx_ai.tooling import ToolChain
 from jose import JWTError, jwt
-from pydantic import BaseModel
-from typing import List, Optional
-import pandas as pd
-import numpy as np
+from pydantic import BaseModel, validator
+from typing import List, Dict, Optional
 import json
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from prometheus_client import Counter, Histogram
 import asyncio
-from typing import Dict, List, Optional, Union
-from ml_models import PredictiveAnalytics, MarketIntelligence
-from visualizations import SupplyChainVisualizer
-from alerts import AlertSystem
+import logging
+import boto3
+from statsmodels.tsa.arima.model import ARIMA
+from mangum import Mangum
 
-# Add metrics
-api_requests = Counter('api_requests_total', 'Total API requests', ['endpoint'])
-model_latency = Histogram('model_inference_seconds', 'Model inference duration')
-# Add new Pydantic models
-class SupplyChainMetrics(BaseModel):
-    inventory_turnover: float
-    order_fulfillment_rate: float
-    supplier_performance: Dict[str, float]
-    risk_score: float
-
-class InventoryOptimizationRequest(BaseModel):
-    current_stock: Dict[str, int]
-    historical_demand: List[Dict[str, float]]
-    lead_times: Dict[str, int]
-    holding_cost: float
-    stockout_cost: float
-# Add new endpoint for comprehensive supply chain analysis
-@app.post("/analyze-supply-chain", response_model=SupplyChainMetrics)
-@limiter.limit("5/minute")
-@cache(expire=600)
-async def analyze_supply_chain(request: Request, user=Depends(get_current_user)):
-    api_requests.labels(endpoint='/analyze-supply-chain').inc()
-    
-    with model_latency.time():
-        prompt = """Analyze the entire supply chain and provide:
-        1. Inventory turnover rate
-        2. Order fulfillment rate
-        3. Supplier performance scores
-        4. Overall risk assessment
-        
-        Format: JSON with numerical metrics"""
-        
-        response = await asyncio.gather(
-            granite_model.generate_text(prompt),
-            simulate_risk(RiskSimulationRequest(disruption=5.0, demand_spike=10.0))
-        )
-        
-        analysis = json.loads(response[0].generated_text)
-        return SupplyChainMetrics(**analysis)
-# Add inventory optimization endpoint
-@app.post("/optimize-inventory")
-@limiter.limit("10/minute")
-async def optimize_inventory(
-    request: Request,
-    data: InventoryOptimizationRequest,
-    user=Depends(get_current_user)
-):
-    api_requests.labels(endpoint='/optimize-inventory').inc()
-    
-    prompt = f"""Optimize inventory levels considering:
-    - Current stock: {data.current_stock}
-    - Historical demand: {data.historical_demand}
-    - Lead times: {data.lead_times}
-    - Holding cost: {data.holding_cost}
-    - Stockout cost: {data.stockout_cost}
-    
-    Provide optimal order quantities and reorder points."""
-    
-    response = granite_model.generate_text(prompt)
-    return json.loads(response.generated_text)
-# Add health check endpoint
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "model_status": "available" if granite_model else "unavailable",
-        "cache_status": "connected" if FastAPICache.get_cache() else "disconnected"
-    }
 # Load environment variables
 load_dotenv()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -98,16 +29,10 @@ logging.basicConfig(
     handlers=[logging.FileHandler('app.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-# Initialize rate limiter
-limiter = Limiter(key_func=get_remote_address)
+
+# Initialize FastAPI app
 app = FastAPI(title="SupplyGenius Pro API")
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-# Security configurations
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
@@ -116,6 +41,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Security configurations
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Metrics
+api_requests = Counter('api_requests_total', 'Total API requests', ['endpoint'])
+model_latency = Histogram('model_inference_seconds', 'Model inference duration')
+
 # Initialize IBM Granite model
 try:
     granite_model = Model(
@@ -127,8 +63,16 @@ try:
         project_id=os.getenv("IBM_PROJECT_ID")
     )
 except Exception as e:
-    print(f"Error initializing IBM Granite model: {e}")
+    logger.error(f"Error initializing IBM Granite model: {e}")
     granite_model = None
+
+# Initialize S3 for file uploads
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_KEY")
+)
+
 # Knowledge Base Implementation
 class SupplyChainKB:
     def __init__(self):
@@ -143,93 +87,102 @@ class SupplyChainKB:
                 "demand_spike": ["Flexible contracts", "Ramp up production"]
             }
         }
+
     def retrieve(self, query: str) -> str:
         return json.dumps(self.knowledge_base.get(query, {}))
-# Initialize RAG
-rag = RetrievalAugmentedGenerator(
-    model=granite_model,
-    retriever=SupplyChainKB().retrieve
-)
-# Tool Chain Initialization
+
+# Initialize RAG and ToolChain
+rag = RetrievalAugmentedGenerator(model=granite_model, retriever=SupplyChainKB().retrieve)
 tool_chain = ToolChain(granite_model)
+
 # Pydantic Models
 class User(BaseModel):
     username: str
     password: str
-    
-    class Config:
-        min_anystr_length = 3
-        max_anystr_length = 50
+
 class ROIRequest(BaseModel):
     current_cost: float
     optimized_cost: float
-    
+
     @validator('current_cost', 'optimized_cost')
     def validate_costs(cls, v):
         if v < 0:
             raise ValueError('Cost cannot be negative')
         return v
+
 class DocumentAnalysisResponse(BaseModel):
     document_type: str
     extracted_data: dict
     confidence_score: float
+
 class PredictionRequest(BaseModel):
     historical_data: List[float]
     forecast_period: int
+
 class PredictionResponse(BaseModel):
     forecast: List[float]
     confidence_intervals: dict
+
 class RiskSimulationRequest(BaseModel):
     disruption: float
     demand_spike: float
+
+class SupplyChainMetrics(BaseModel):
+    inventory_turnover: float
+    order_fulfillment_rate: float
+    supplier_performance: Dict[str, float]
+    risk_score: float
+
+class InventoryOptimizationRequest(BaseModel):
+    current_stock: Dict[str, int]
+    historical_demand: List[Dict[str, float]]
+    lead_times: Dict[str, int]
+    holding_cost: float
+    stockout_cost: float
+
+# In-memory user database (replace with real DB in production)
+users_db = {"admin": {"username": "admin", "password": "supplygenius"}}
+
 # Authentication Functions
 def create_access_token(data: dict):
     expires = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     data.update({"exp": expires})
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-# Enhanced API endpoints with rate limiting and caching
+
+# API Endpoints
+
 @app.post("/token")
-@limiter.limit("5/minute")
-async def login(request: Request, user: User):
-    if user.username != "admin" or user.password != "supplygenius":
+async def login(user: User):
+    db_user = users_db.get(user.username)
+    if not db_user or db_user["password"] != user.password:
         raise HTTPException(status_code=400, detail="Invalid credentials")
     return {"access_token": create_access_token({"sub": user.username})}
+
 @app.post("/process-document", response_model=DocumentAnalysisResponse)
-@limiter.limit("10/minute")
-async def process_document(request: Request, file: UploadFile = File(...), user=Depends(get_current_user)):
+async def process_document(file: UploadFile = File(...), user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/process-document').inc()
     if not file.content_type.startswith('text/'):
         raise HTTPException(status_code=400, detail="Only text files are supported")
-    
     if not granite_model:
         raise HTTPException(status_code=503, detail="AI model not available")
-    
     try:
+        # Upload file to S3
+        s3.upload_fileobj(file.file, "your-bucket-name", file.filename)
+        # Process file (simplified for demo)
         content = await file.read()
         content_text = content.decode("utf-8")
-        
         prompt = f"""Analyze this supply chain document and extract structured data:
         {content_text}
-        
-        Return JSON with:
-        - document_type
-        - parties_involved
-        - key_dates
-        - financial_terms
-        - quantities
-        - compliance_status
-        """
-        
-        response = granite_model.generate_text(
-            prompt=prompt,
-            params={GenTextParamsMetaNames.MAX_NEW_TOKENS: 500}
-        )
-        
+        Return JSON with: document_type, parties_involved, key_dates, financial_terms, quantities, compliance_status"""
+        with model_latency.time():
+            response = granite_model.generate_text(prompt=prompt, params={GenTextParamsMetaNames.MAX_NEW_TOKENS: 500})
         analysis = json.loads(response.generated_text)
         return DocumentAnalysisResponse(
             document_type=analysis.get("document_type", "unknown"),
@@ -237,116 +190,104 @@ async def process_document(request: Request, file: UploadFile = File(...), user=
             confidence_score=0.97
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Document processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Document processing failed")
+
 @app.post("/predict-demand", response_model=PredictionResponse)
-@limiter.limit("20/minute")
-@cache(expire=300)
-async def predict_demand(request: Request, pred_request: PredictionRequest, user=Depends(get_current_user)):
-    if not granite_model:
-        raise HTTPException(status_code=503, detail="AI model not available")
-    
+async def predict_demand(pred_request: PredictionRequest, user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/predict-demand').inc()
     try:
-        prompt = f"""Analyze historical demand data and predict next {request.forecast_period} periods:
-        Data: {request.historical_data}
-        Include confidence intervals."""
-        
-        response = granite_model.generate_text(prompt)
-        forecast = json.loads(response.generated_text)
-        return PredictionResponse(**forecast)
+        model = ARIMA(pred_request.historical_data, order=(5,1,0))
+        model_fit = model.fit()
+        forecast = model_fit.forecast(steps=pred_request.forecast_period)
+        return PredictionResponse(
+            forecast=forecast.tolist(),
+            confidence_intervals={"lower": [0.0] * pred_request.forecast_period, "upper": [0.0] * pred_request.forecast_period}
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Demand prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Demand prediction failed")
+
 @app.post("/simulate-risk")
 async def simulate_risk(request: RiskSimulationRequest, user=Depends(get_current_user)):
-    prompt = f"""Simulate supply chain risk with:
-    {request.disruption}% disruption and {request.demand_spike}% demand spike.
-    Suggest mitigation strategies."""
-    
+    api_requests.labels(endpoint='/simulate-risk').inc()
+    prompt = f"""Simulate supply chain risk with {request.disruption}% disruption and {request.demand_spike}% demand spike. Suggest mitigation strategies."""
     response = rag.generate(prompt)
     return {"strategies": response.split("\n")}
+
 @tool_chain.tool
 def generate_purchase_order(supplier: str, items: dict):
     return f"PO-{datetime.now().timestamp()}\nSupplier: {supplier}\nItems: {json.dumps(items)}"
+
 @app.post("/generate-po")
 async def create_po(supplier: str = Form(...), items: str = Form(...), user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/generate-po').inc()
     return tool_chain.run(f"Generate PO for {supplier} with items: {items}")
+
 class ROICalculator:
     @staticmethod
     def calculate(data: dict):
         current = data.get('current_cost', 0)
         optimized = data.get('optimized_cost', 0)
-        return {
-            "savings": current - optimized,
-            "roi": f"{((current - optimized)/current)*100:.1f}%"
-        }
-# Enhanced ROI calculator endpoint
+        if current == 0:
+            return {"savings": 0, "roi": "0%"}
+        savings = current - optimized
+        roi = (savings / current) * 100
+        return {"savings": savings, "roi": f"{roi:.1f}%"}
+
 @app.post("/calculate-roi")
-@limiter.limit("30/minute")
-async def calculate_roi(request: Request, data: ROIRequest, user=Depends(get_current_user)):
+async def calculate_roi(data: ROIRequest, user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/calculate-roi').inc()
     try:
         result = ROICalculator.calculate(data.dict())
-        logger.info(f"ROI calculation completed for user {user['sub']}")
+        logger.info(f"ROI calculated for user {user['sub']}: {result}")
         return result
     except Exception as e:
         logger.error(f"ROI calculation failed: {str(e)}")
         raise HTTPException(status_code=500, detail="ROI calculation failed")
-# Startup event to initialize cache
-@app.on_event("startup")
-async def startup():
+
+@app.post("/analyze-supply-chain", response_model=SupplyChainMetrics)
+async def analyze_supply_chain(user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/analyze-supply-chain').inc()
     try:
-        redis = aioredis.from_url("redis://localhost", encoding="utf8", decode_responses=True)
-        FastAPICache.init(RedisBackend(redis), prefix="supplygenius-cache")
-        logger.info("Cache initialized successfully")
+        prompt = """Analyze the entire supply chain and provide:
+        1. Inventory turnover rate
+        2. Order fulfillment rate
+        3. Supplier performance scores
+        4. Overall risk assessment
+        Format: JSON with numerical metrics"""
+        with model_latency.time():
+            response = granite_model.generate_text(prompt)
+        analysis = json.loads(response.generated_text)
+        return SupplyChainMetrics(**analysis)
     except Exception as e:
-        logger.error(f"Cache initialization failed: {str(e)}")
-# Shutdown event for cleanup
-@app.on_event("shutdown")
-async def shutdown():
-    logger.info("Shutting down application")
-# Add imports at the top
-from ml_models import PredictiveAnalytics, MarketIntelligence
-from visualizations import SupplyChainVisualizer
-from alerts import AlertSystem
-# Initialize components after existing initializations
-predictive_analytics = PredictiveAnalytics()
-visualizer = SupplyChainVisualizer()
-alert_system = AlertSystem()
-# Add new endpoint for advanced analytics
-@app.post("/advanced-analytics")
-@limiter.limit("10/minute")
-async def get_advanced_analytics(
-    request: Request,
-    historical_data: List[float],
-    forecast_horizon: int = 12,
-    user=Depends(get_current_user)
-):
-    forecasts = predictive_analytics.predict_demand(
-        np.array(historical_data),
-        forecast_horizon
-    )
-    
-    visualization = visualizer.create_demand_forecast_plot(
-        historical_data,
-        forecasts["ensemble_forecast"]
-    )
-    
-    return {
-        "forecasts": forecasts,
-        "visualization": visualization
-    }
-# Add WebSocket endpoint for real-time alerts
-@app.websocket("/ws/alerts")
-async def alert_websocket(websocket: WebSocket):
-    await websocket.accept()
+        logger.error(f"Supply chain analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Supply chain analysis failed")
+
+@app.post("/optimize-inventory")
+async def optimize_inventory(data: InventoryOptimizationRequest, user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/optimize-inventory').inc()
     try:
-        while True:
-            inventory_alerts = await alert_system.check_inventory_alerts(
-                await get_current_inventory_levels()
-            )
-            if inventory_alerts:
-                await websocket.send_json({"alerts": inventory_alerts})
-            await asyncio.sleep(10)
-    except WebSocketDisconnect:
-        logger.info("Alert WebSocket disconnected")
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        prompt = f"""Optimize inventory levels considering:
+        - Current stock: {data.current_stock}
+        - Historical demand: {data.historical_demand}
+        - Lead times: {data.lead_times}
+        - Holding cost: {data.holding_cost}
+        - Stockout cost: {data.stockout_cost}
+        Provide optimal order quantities and reorder points."""
+        response = granite_model.generate_text(prompt)
+        return json.loads(response.generated_text)
+    except Exception as e:
+        logger.error(f"Inventory optimization failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Inventory optimization failed")
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "model_status": "available" if granite_model else "unavailable",
+        "cache_status": "connected"  # Simplified for demo
+    }
+
+# Vercel serverless handler
+handler = Mangum(app)
