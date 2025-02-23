@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SupplyGenius Pro</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="min-h-screen">
+        <nav class="bg-blue-600 shadow-lg">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex items-center justify-between h-16">
+                    <div class="flex items-center">
+                        <span class="text-white text-2xl font-bold">SupplyGenius Pro</span>
+                    </div>
+                    <div class="hidden md:block">
+                        <div class="ml-4 flex items-center space-x-4">
+                            <button onclick="showSection('dashboard')" class="text-white hover:bg-blue-700 px-3 py-2 rounded">Dashboard</button>
+                            <button onclick="showSection('simulation')" class="text-white hover:bg-blue-700 px-3 py-2 rounded">Simulation</button>
+                            <button onclick="showSection('tools')" class="text-white hover:bg-blue-700 px-3 py-2 rounded">Tools</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+            <!-- Dashboard Section -->
+            <div id="dashboard" class="section">
+                <div class="grid grid-cols-2 gap-6">
+                    <div class="bg-white shadow rounded-lg p-6">
+                        <h2 class="text-2xl font-bold mb-4">Supply Chain Metrics</h2>
+                        <div id="metricsContainer" class="space-y-4"></div>
+                    </div>
+                    <div class="bg-white shadow rounded-lg p-6">
+                        <h2 class="text-2xl font-bold mb-4">Inventory Optimization</h2>
+                        <div class="space-y-4">
+                            <div class="grid grid-cols-2 gap-4">
+                                <input type="number" id="holdingCost" placeholder="Holding Cost" class="p-2 border rounded">
+                                <input type="number" id="stockoutCost" placeholder="Stockout Cost" class="p-2 border rounded">
+                            </div>
+                            <button onclick="optimizeInventory()" class="w-full bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+                                Optimize Inventory
+                            </button>
+                            <div id="optimizationResults" class="hidden mt-4 p-4 bg-gray-50 rounded"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Simulation Section -->
+            <div id="simulation" class="section hidden">
+                <div class="bg-white shadow rounded-lg p-6">
+                    <h2 class="text-2xl font-bold mb-4">Risk Simulation</h2>
+                    <div class="grid grid-cols-2 gap-6">
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <label class="block text-sm font-medium mb-2">Supply Disruption (%)</label>
+                            <input type="range" id="disruption" min="0" max="100" 
+                                   class="w-full" oninput="updateSimulation()">
+                            <div class="mt-2 text-center text-lg font-semibold">
+                                <span id="disruptionValue">0</span>%
+                            </div>
+                        </div>
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <label class="block text-sm font-medium mb-2">Demand Spike (%)</label>
+                            <input type="range" id="demand-spike" min="0" max="100" 
+                                   class="w-full" oninput="updateSimulation()">
+                            <div class="mt-2 text-center text-lg font-semibold">
+                                <span id="demandSpikeValue">0</span>%
+                            </div>
+                        </div>
+                    </div>
+                    <div id="simulationResults" class="mt-6 hidden">
+                        <h3 class="text-xl font-semibold mb-4">Mitigation Strategies</h3>
+                        <div id="mitigationStrategies" class="space-y-3"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tools Section -->
+            <div id="tools" class="section hidden">
+                <div class="grid grid-cols-2 gap-6">
+                    <div class="bg-white shadow rounded-lg p-6">
+                        <h2 class="text-xl font-semibold mb-4">Purchase Order Generator</h2>
+                        <div class="space-y-4">
+                            <input type="text" id="supplier" placeholder="Supplier Name" 
+                                   class="w-full p-2 border rounded">
+                            <textarea id="poItems" placeholder="Items (JSON format)" 
+                                     class="w-full p-2 border rounded h-32"></textarea>
+                            <button onclick="generatePO()" 
+                                    class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+                                Generate PO
+                            </button>
+                            <div id="poOutput" class="hidden mt-4 p-4 bg-gray-50 rounded"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Authentication
+        let authToken = '';
+        
+        async function login() {
+            try {
+                const response = await axios.post('/token', {
+                    username: 'admin',
+                    password: 'supplygenius'
+                });
+                authToken = response.data.access_token;
+                await loadDashboard(); // Load dashboard data after successful login
+            } catch (error) {
+                alert('Login failed');
+            }
+        }
+
+        // Section Navigation
+        function showSection(sectionId) {
+            document.querySelectorAll('.section').forEach(el => el.classList.add('hidden'));
+            document.getElementById(sectionId).classList.remove('hidden');
+        }
+
+        // Simulation Update
+        async function updateSimulation() {
+            const disruption = document.getElementById('disruption').value;
+            const demandSpike = document.getElementById('demand-spike').value;
+            
+            document.getElementById('disruptionValue').textContent = disruption;
+            document.getElementById('demandSpikeValue').textContent = demandSpike;
+
+            try {
+                const response = await axios.post('/simulate-risk', {
+                    disruption: parseFloat(disruption),
+                    demand_spike: parseFloat(demandSpike)
+                }, {
+                    headers: {Authorization: `Bearer ${authToken}`}
+                });
+
+                const strategies = response.data.strategies;
+                const container = document.getElementById('mitigationStrategies');
+                container.innerHTML = strategies.map(s => `
+                    <div class="p-3 bg-red-50 rounded-lg border border-red-200">${s}</div>
+                `).join('');
+
+                document.getElementById('simulationResults').classList.remove('hidden');
+            } catch (error) {
+                console.error('Simulation error:', error);
+            }
+        }
+
+        // PO Generation
+        async function generatePO() {
+            const supplier = document.getElementById('supplier').value;
+            const items = document.getElementById('poItems').value;
+
+            try {
+                const response = await axios.post('/generate-po', {
+                    supplier: supplier,
+                    items: items
+                }, {
+                    headers: {
+                        Authorization: `Bearer ${authToken}`,
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    }
+                });
+
+                const poOutput = document.getElementById('poOutput');
+                poOutput.textContent = response.data;
+                poOutput.classList.remove('hidden');
+            } catch (error) {
+                alert('PO generation failed');
+            }
+        }
+
+        // Dashboard Loading
+        async function loadDashboard() {
+            try {
+                const response = await axios.post('/analyze-supply-chain', {}, {
+                    headers: {Authorization: `Bearer ${authToken}`}
+                });
+                
+                const metrics = response.data;
+                const metricsContainer = document.getElementById('metricsContainer');
+                
+                metricsContainer.innerHTML = `
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="p-4 bg-blue-50 rounded-lg">
+                            <div class="text-sm text-blue-600">Inventory Turnover</div>
+                            <div class="text-2xl font-bold">${metrics.inventory_turnover.toFixed(2)}</div>
+                        </div>
+                        <div class="p-4 bg-green-50 rounded-lg">
+                            <div class="text-sm text-green-600">Order Fulfillment Rate</div>
+                            <div class="text-2xl font-bold">${metrics.order_fulfillment_rate.toFixed(2)}%</div>
+                        </div>
+                        <div class="p-4 bg-yellow-50 rounded-lg">
+                            <div class="text-sm text-yellow-600">Risk Score</div>
+                            <div class="text-2xl font-bold">${metrics.risk_score.toFixed(2)}</div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Failed to load dashboard:', error);
+            }
+        }
+
+        // Inventory Optimization
+        async function optimizeInventory() {
+            const holdingCost = parseFloat(document.getElementById('holdingCost').value);
+            const stockoutCost = parseFloat(document.getElementById('stockoutCost').value);
+
+            if (!holdingCost || !stockoutCost) {
+                alert('Please enter all required values');
+                return;
+            }
+
+            try {
+                const response = await axios.post('/optimize-inventory', {
+                    current_stock: {"product1": 100, "product2": 150}, // Example data
+                    historical_demand: [{"product1": 50, "product2": 75}], // Example data
+                    lead_times: {"product1": 5, "product2": 7}, // Example data
+                    holding_cost: holdingCost,
+                    stockout_cost: stockoutCost
+                }, {
+                    headers: {Authorization: `Bearer ${authToken}`}
+                });
+
+                const results = document.getElementById('optimizationResults');
+                results.innerHTML = `
+                    <h3 class="font-semibold mb-2">Optimization Results</h3>
+                    <pre class="whitespace-pre-wrap">${JSON.stringify(response.data, null, 2)}</pre>
+                `;
+                results.classList.remove('hidden');
+            } catch (error) {
+                alert('Optimization failed');
+                console.error('Optimization error:', error);
+            }
+        }
+
+        // Initialize
+        login();
+    </script>
+</body>
+</html>

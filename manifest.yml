@@ -1,0 +1,11 @@
+applications:
+- name: supplygenius
+  random-route: true
+  memory: 512M
+  command: uvicorn app:app --host 0.0.0.0 --port 8080
+  buildpack: python_buildpack
+  env:
+    IBM_CLOUD_API_KEY: ${IBM_CLOUD_API_KEY}
+    IBM_CLOUD_URL: ${IBM_CLOUD_URL}
+    IBM_PROJECT_ID: ${IBM_PROJECT_ID}
+    SECRET_KEY: ${SECRET_KEY}
