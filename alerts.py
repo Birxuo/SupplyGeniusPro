@@ -10,7 +10,7 @@ class AlertSystem:
             "supplier_delay": 48,
             "quality_issues": 0.05
         }
-    
+
     async def check_inventory_alerts(self, inventory_levels: Dict[str, float]) -> List[dict]:
         alerts = []
         for item, level in inventory_levels.items():
@@ -23,7 +23,3 @@ class AlertSystem:
                     "timestamp": datetime.now().isoformat()
                 })
         return alerts
-
-    async def check_supplier_alerts(self, supplier_data: Dict[str, dict]) -> List[dict]:
-        # Implementation for supplier alerts
-        pass
