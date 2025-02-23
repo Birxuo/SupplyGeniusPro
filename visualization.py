@@ -10,18 +10,18 @@ class SupplyChainVisualizer:
         fig.add_trace(go.Scatter(y=historical, name="Historical"))
         fig.add_trace(go.Scatter(y=forecast, name="Forecast"))
         return fig.to_dict()
-    
+
     @staticmethod
     def create_inventory_heatmap(inventory_levels: Dict[str, Dict[str, float]]) -> dict:
         df = pd.DataFrame(inventory_levels)
         fig = px.imshow(df, aspect="auto")
         return fig.to_dict()
-    
+
     @staticmethod
     def create_risk_dashboard(risk_metrics: Dict[str, float]) -> dict:
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
-            value=risk_metrics["overall_risk"],
+            value=risk_metrics.get("overall_risk", 0),
             gauge={"axis": {"range": [0, 100]}}
         ))
         return fig.to_dict()
