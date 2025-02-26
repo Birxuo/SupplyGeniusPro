@@ -51,7 +51,7 @@ SupplyGenius Pro is a state-of-the-art supply chain management system designed t
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/SupplyGeniusPro.git
+   git clone https://github.com/birxuo/SupplyGeniusPro.git
 
 Navigate to the Project Directory:
 
