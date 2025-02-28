@@ -724,3 +724,143 @@ async def calculate_roi(data: ROIRequest, user=Depends(get_current_user)):
 @app.post("/analyze-supply-chain", response_model=SupplyChainMetrics)
 async def analyze_supply_chain(user=Depends(get_current_user)):
     api_requests.labels(endpoint='/analyze-supply-chain', status='processing').inc()
+
+@app.post("/analyze-supply-chain", response_model=SupplyChainMetrics)
+async def analyze_supply_chain(user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/analyze-supply-chain', status='processing').inc()
+    
+    # Check if user has admin role
+    if user.get("role") != "admin":
+        api_requests.labels(endpoint='/analyze-supply-chain', status='failure').inc()
+        raise HTTPException(status_code=403, detail="Admin access required for this endpoint")
+    
+    try:
+        # In production, this would connect to actual supply chain data sources
+        # Here we're using sample data for demonstration
+        metrics = SupplyChainMetrics(
+            inventory_turnover=5.8,
+            order_fulfillment_rate=0.93,
+            supplier_performance={
+                "ACME Corp": 0.92,
+                "GlobalParts": 0.89,
+                "EcoSupply": 0.85,
+                "FastTrack": 0.88
+            },
+            risk_score=0.28
+        )
+        
+        api_requests.labels(endpoint='/analyze-supply-chain', status='success').inc()
+        return metrics
+    except Exception as e:
+        logger.error(f"Supply chain analysis failed: {str(e)}", exc_info=True)
+        api_requests.labels(endpoint='/analyze-supply-chain', status='failure').inc()
+        raise HTTPException(status_code=500, detail=f"Supply chain analysis failed: {str(e)}")
+
+@app.post("/optimize-inventory")
+async def optimize_inventory(request: InventoryOptimizationRequest, user=Depends(get_current_user)):
+    api_requests.labels(endpoint='/optimize-inventory', status='processing').inc()
+    
+    try:
+        # Get the RAG instance
+        rag_instance = get_rag()
+        if not rag_instance:
+            raise HTTPException(status_code=503, detail="RAG service not available")
+        
+        # Create a detailed context for inventory optimization
+        prompt = f"""
+        Optimize inventory levels for the following items based on:
+        
+        Current stock levels: {json.dumps(request.current_stock)}
+        Historical demand data: {json.dumps(request.historical_demand)}
+        Supplier lead times: {json.dumps(request.lead_times)}
+        Holding cost per unit: {request.holding_cost}
+        Stockout cost per unit: {request.stockout_cost}
+        
+        For each item, calculate and provide:
+        1. Optimal reorder point
+        2. Economic order quantity (EOQ)
+        3. Safety stock level
+        4. Recommended inventory level
+        5. Expected service level
+        
+        Format your response as a JSON object where each key is an item name and the value is another 
+        object containing the optimization parameters.
+        """
+        
+        # Generate optimization with RAG
+        with model_latency.time():
+            response = rag_instance.generate(prompt)
+        
+        # Parse the response as JSON
+        try:
+            # Ensure the response is valid JSON
+            if not response.strip().startswith("{"):
+                response = "{" + response.split("{", 1)[1]
+            if not response.strip().endswith("}"):
+                response = response.rsplit("}", 1)[0] + "}"
+                
+            result = json.loads(response)
+        except json.JSONDecodeError:
+            # Fallback for malformed JSON
+            logger.warning(f"Malformed JSON from model: {response}")
+            
+            # Create a simple fallback response
+            result = {}
+            for item in request.current_stock:
+                # Simple EOQ calculation as fallback
+                avg_demand = sum(period.get(item, 0) for period in request.historical_demand) / len(request.historical_demand)
+                lead_time = request.lead_times.get(item, 14)
+                
+                result[item] = {
+                    "reorder_point": int(avg_demand * lead_time * 1.5),
+                    "economic_order_quantity": int(((2 * avg_demand * 365) * request.stockout_cost / request.holding_cost) ** 0.5),
+                    "safety_stock": int(avg_demand * lead_time * 0.5),
+                    "recommended_level": int(avg_demand * lead_time * 2),
+                    "service_level": 0.95,
+                    "note": "Calculated using fallback method due to processing error"
+                }
+        
+        api_requests.labels(endpoint='/optimize-inventory', status='success').inc()
+        return {
+            "optimized_inventory": result,
+            "total_holding_cost": sum(level["recommended_level"] * request.holding_cost for item, level in result.items()),
+            "expected_service_level": sum(level["service_level"] for item, level in result.items()) / len(result) if result else 0
+        }
+    except Exception as e:
+        logger.error(f"Inventory optimization failed: {str(e)}", exc_info=True)
+        api_requests.labels(endpoint='/optimize-inventory', status='failure').inc()
+        raise HTTPException(status_code=500, detail=f"Inventory optimization failed: {str(e)}")
+
+@app.get("/metrics")
+async def metrics(user=Depends(get_current_user)):
+    # Only admin users can access metrics
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required for metrics")
+    
+    return Response(generate_latest(), media_type="text/plain")
+
+@app.get("/health")
+async def health_check():
+    # Basic health check endpoint
+    services_status = {
+        "api": "healthy",
+        "model_service": "healthy" if get_granite_model() else "degraded",
+        "database": "healthy"  # In production, check actual DB connection
+    }
+    
+    overall_status = "healthy" if all(status == "healthy" for status in services_status.values()) else "degraded"
+    
+    return {
+        "status": overall_status,
+        "version": "1.0.0",
+        "services": services_status,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# For deployment to AWS Lambda with API Gateway
+handler = Mangum(app)
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
